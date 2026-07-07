@@ -55,11 +55,11 @@ def load_data(uploaded_file):
     df_sub['First Step'] = df_sub['Process Steps'].apply(lambda x: x[0] if x else None)
     df_sub['Last Step'] = df_sub['Process Steps'].apply(lambda x: x[-1] if x else None)
     
-    # Define Statuses
-    # Active WIP: has First Process Plan Date and Current Operation not empty
-    # Completed: has First Process Plan Date and Current Operation is empty
-    # Pending: First Process Plan Date is empty
+    # Convert dates
     df_sub['First Process Plan Date'] = pd.to_datetime(df_sub['First Process Plan Date'], errors='coerce')
+    df_sub['Exwork Date'] = pd.to_datetime(df_sub['Exwork Date'], errors='coerce')
+    
+    # Define Statuses
     df_sub['Has Plan'] = df_sub['First Process Plan Date'].notna()
     df_sub['Has Current Op'] = df_sub['Current Operation'].notna() & (df_sub['Current Operation'].astype(str).str.strip() != '')
     df_sub['Status'] = 'Pending'
@@ -67,6 +67,61 @@ def load_data(uploaded_file):
     df_sub.loc[df_sub['Has Plan'] & ~df_sub['Has Current Op'], 'Status'] = 'Completed'
     
     return df_sub
+
+# ---------- Process Summary Function ----------
+def get_process_summary(df):
+    # Extract all unique processes from all subparts
+    all_processes = set()
+    for steps in df['Process Steps']:
+        all_processes.update(steps)
+    all_processes = sorted(all_processes)
+    
+    summary_rows = []
+    for proc in all_processes:
+        total = 0
+        completed = 0
+        pending = 0
+        for idx, row in df.iterrows():
+            steps = row['Process Steps']
+            if proc in steps:
+                total += 1
+                current_op = row['Current Operation']
+                # Determine if process is completed or pending
+                if pd.isna(current_op) or str(current_op).strip() == '':
+                    # No current op => all steps done
+                    completed += 1
+                else:
+                    # Find index of proc in steps
+                    try:
+                        proc_idx = steps.index(proc)
+                    except ValueError:
+                        proc_idx = -1  # should not happen
+                    if proc_idx == -1:
+                        # fallback: consider as pending (should not happen)
+                        pending += 1
+                    else:
+                        # Find index of current op in steps
+                        try:
+                            cur_idx = steps.index(current_op)
+                        except ValueError:
+                            # current op not in steps list => treat as completed if current op is not in list? 
+                            # Safer: treat as pending (data inconsistency)
+                            pending += 1
+                        else:
+                            if proc_idx < cur_idx:
+                                completed += 1
+                            else:
+                                # proc_idx >= cur_idx means not completed (either current or future)
+                                pending += 1
+        completion_rate = (completed / total * 100) if total > 0 else 0
+        summary_rows.append({
+            'Process': proc,
+            'Total Subparts': total,
+            'Completed': completed,
+            'Pending': pending,
+            'Completion %': round(completion_rate, 1)
+        })
+    return pd.DataFrame(summary_rows)
 
 # ---------- Main App ----------
 uploaded_file = st.file_uploader("Upload Excel file (.xlsx)", type=['xlsx'])
@@ -115,9 +170,10 @@ if uploaded_file is not None:
     col5.metric("Progress %", f"{progress:.1f}%")
     
     # ---------- Tabs ----------
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📈 Overview", 
         "🔧 Process Analysis", 
+        "📊 Process Summary",
         "📋 Data Details", 
         "🧠 AI Insights",
         "⚠️ Urgency (Exwork)"
@@ -138,7 +194,7 @@ if uploaded_file is not None:
         fig2 = px.bar(top_sub, x='Subpart', y='Count', title="Top 10 Subparts by Occurrence")
         st.plotly_chart(fig2, use_container_width=True)
         
-        # Completion rate by Main Part (optional)
+        # Completion rate by Main Part
         st.subheader("Completion Rate by Main Part")
         main_status = df.groupby('Main Part Num')['Status'].value_counts().unstack(fill_value=0)
         main_status['Total'] = main_status.sum(axis=1)
@@ -177,6 +233,30 @@ if uploaded_file is not None:
             st.plotly_chart(fig7, use_container_width=True)
     
     with tab3:
+        st.subheader("Process Summary Table")
+        summary_df = get_process_summary(df)
+        if not summary_df.empty:
+            # Display table with formatting
+            st.dataframe(summary_df, use_container_width=True)
+            
+            # Visualizations
+            col1, col2 = st.columns(2)
+            with col1:
+                # Completion % bar chart
+                fig8 = px.bar(summary_df, x='Process', y='Completion %', 
+                              title="Completion % by Process", 
+                              color='Completion %', color_continuous_scale='Blues')
+                st.plotly_chart(fig8, use_container_width=True)
+            with col2:
+                # Pending count bar chart
+                fig9 = px.bar(summary_df, x='Process', y='Pending', 
+                              title="Pending Subparts by Process", 
+                              color='Pending', color_continuous_scale='Reds')
+                st.plotly_chart(fig9, use_container_width=True)
+        else:
+            st.info("No process data available.")
+    
+    with tab4:
         st.subheader("Cleaned Data (Key Columns)")
         display_cols = ['Main Part Num', 'Subpart Part Num', 'Subpart Qty', 'JobNum/Asm', 
                         'Current Operation', 'Status', 'Step Count', 'Process Steps', 
@@ -184,7 +264,7 @@ if uploaded_file is not None:
         available = [c for c in display_cols if c in df.columns]
         st.dataframe(df[available], use_container_width=True)
     
-    with tab4:
+    with tab5:
         st.subheader("🧠 AI-Generated Business Insights")
         if model and api_key:
             # Prepare summary stats
@@ -212,7 +292,7 @@ if uploaded_file is not None:
         else:
             st.info("Enter a valid Gemini API key in the sidebar to get AI insights.")
     
-    with tab5:
+    with tab6:
         st.subheader("Urgency by Exwork Date")
         if 'Exwork Date' in df.columns:
             df['Exwork Date'] = pd.to_datetime(df['Exwork Date'], errors='coerce')
@@ -232,10 +312,10 @@ if uploaded_file is not None:
             df['Urgency'] = df['Exwork Date'].apply(urgency_group)
             urgency_counts = df['Urgency'].value_counts().reset_index()
             urgency_counts.columns = ['Urgency', 'Count']
-            fig8 = px.bar(urgency_counts, x='Urgency', y='Count', 
+            fig10 = px.bar(urgency_counts, x='Urgency', y='Count', 
                           title="Subparts by Exwork Date Urgency", 
                           color='Urgency', color_discrete_sequence=px.colors.qualitative.Set3)
-            st.plotly_chart(fig8, use_container_width=True)
+            st.plotly_chart(fig10, use_container_width=True)
             # Show list of urgent items
             st.subheader("Overdue or Next 7 Days")
             urgent_df = df[df['Urgency'].isin(['Overdue', 'Next 7 Days'])]
