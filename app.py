@@ -15,7 +15,7 @@ st.markdown("Upload Excel report (JobStatByCust3) to generate visual summaries")
 def init_gemini(api_key):
     try:
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-1.5-flash')
+        return genai.GenerativeModel('gemini-1.5-flash')  # 或 'gemini-1.5-pro'
     except Exception as e:
         st.error(f"Gemini init failed: {e}")
         return None
@@ -70,7 +70,6 @@ def load_data(uploaded_file):
 
 # ---------- Process Summary Function ----------
 def get_process_summary(df):
-    # Extract all unique processes from all subparts
     all_processes = set()
     for steps in df['Process Steps']:
         all_processes.update(steps)
@@ -86,33 +85,23 @@ def get_process_summary(df):
             if proc in steps:
                 total += 1
                 current_op = row['Current Operation']
-                # Determine if process is completed or pending
                 if pd.isna(current_op) or str(current_op).strip() == '':
-                    # No current op => all steps done
                     completed += 1
                 else:
-                    # Find index of proc in steps
                     try:
                         proc_idx = steps.index(proc)
                     except ValueError:
-                        proc_idx = -1  # should not happen
-                    if proc_idx == -1:
-                        # fallback: consider as pending (should not happen)
+                        pending += 1
+                        continue
+                    try:
+                        cur_idx = steps.index(current_op)
+                    except ValueError:
                         pending += 1
                     else:
-                        # Find index of current op in steps
-                        try:
-                            cur_idx = steps.index(current_op)
-                        except ValueError:
-                            # current op not in steps list => treat as completed if current op is not in list? 
-                            # Safer: treat as pending (data inconsistency)
-                            pending += 1
+                        if proc_idx < cur_idx:
+                            completed += 1
                         else:
-                            if proc_idx < cur_idx:
-                                completed += 1
-                            else:
-                                # proc_idx >= cur_idx means not completed (either current or future)
-                                pending += 1
+                            pending += 1
         completion_rate = (completed / total * 100) if total > 0 else 0
         summary_rows.append({
             'Process': proc,
@@ -180,21 +169,18 @@ if uploaded_file is not None:
     ])
     
     with tab1:
-        # Main Part distribution
         st.subheader("Subpart Count by Main Part")
         main_counts = df['Main Part Num'].value_counts().reset_index()
         main_counts.columns = ['Main Part', 'Count']
         fig1 = px.bar(main_counts, x='Main Part', y='Count', title="Number of Subparts per Main Part")
         st.plotly_chart(fig1, use_container_width=True)
         
-        # Top 10 most frequent subparts
         st.subheader("Top 10 Most Frequent Subparts")
         top_sub = df['Subpart Part Num'].value_counts().head(10).reset_index()
         top_sub.columns = ['Subpart', 'Count']
         fig2 = px.bar(top_sub, x='Subpart', y='Count', title="Top 10 Subparts by Occurrence")
         st.plotly_chart(fig2, use_container_width=True)
         
-        # Completion rate by Main Part
         st.subheader("Completion Rate by Main Part")
         main_status = df.groupby('Main Part Num')['Status'].value_counts().unstack(fill_value=0)
         main_status['Total'] = main_status.sum(axis=1)
@@ -205,21 +191,18 @@ if uploaded_file is not None:
         st.plotly_chart(fig3, use_container_width=True)
     
     with tab2:
-        # Current Operation Distribution
         st.subheader("Current Operation Distribution")
         op_counts = df[df['Status'] == 'Active WIP']['Current Operation'].value_counts().reset_index()
         op_counts.columns = ['Operation', 'Count']
         fig4 = px.pie(op_counts, names='Operation', values='Count', title="Active WIP by Current Operation")
         st.plotly_chart(fig4, use_container_width=True)
         
-        # Step Count distribution
         st.subheader("Number of Process Steps per Subpart")
         step_hist = df['Step Count'].value_counts().sort_index().reset_index()
         step_hist.columns = ['Steps', 'Count']
         fig5 = px.bar(step_hist, x='Steps', y='Count', title="Distribution of Process Steps")
         st.plotly_chart(fig5, use_container_width=True)
         
-        # First and Last Step Top 10
         col1, col2 = st.columns(2)
         with col1:
             first_steps = df['First Step'].value_counts().head(10).reset_index()
@@ -236,19 +219,14 @@ if uploaded_file is not None:
         st.subheader("Process Summary Table")
         summary_df = get_process_summary(df)
         if not summary_df.empty:
-            # Display table with formatting
             st.dataframe(summary_df, use_container_width=True)
-            
-            # Visualizations
             col1, col2 = st.columns(2)
             with col1:
-                # Completion % bar chart
                 fig8 = px.bar(summary_df, x='Process', y='Completion %', 
                               title="Completion % by Process", 
                               color='Completion %', color_continuous_scale='Blues')
                 st.plotly_chart(fig8, use_container_width=True)
             with col2:
-                # Pending count bar chart
                 fig9 = px.bar(summary_df, x='Process', y='Pending', 
                               title="Pending Subparts by Process", 
                               color='Pending', color_continuous_scale='Reds')
@@ -316,7 +294,6 @@ if uploaded_file is not None:
                           title="Subparts by Exwork Date Urgency", 
                           color='Urgency', color_discrete_sequence=px.colors.qualitative.Set3)
             st.plotly_chart(fig10, use_container_width=True)
-            # Show list of urgent items
             st.subheader("Overdue or Next 7 Days")
             urgent_df = df[df['Urgency'].isin(['Overdue', 'Next 7 Days'])]
             if not urgent_df.empty:
