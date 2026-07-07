@@ -23,32 +23,51 @@ def init_gemini(api_key):
 # ---------- 数据加载与清洗 ----------
 @st.cache_data
 def load_data(uploaded_file):
+    # 读取 Excel，保留所有列
     df = pd.read_excel(uploaded_file, header=0)
-    # 去除完全空行
+    
+    # 1. 删除全空行（包括所有列为空）
     df = df.dropna(how='all')
-    # 前向填充 Main Part Num（因为主零件号只在第一行出现）
-    df['Main Part Num'] = df['Main Part Num'].fillna(method='ffill')
-    # 只保留 Subpart Part Num 非空的行（即为真正的子零件行）
+    
+    # 2. 前向填充 Main Part Num（因每张主零件只有首行有值）
+    if 'Main Part Num' in df.columns:
+        df['Main Part Num'] = df['Main Part Num'].ffill()   # 修复弃用警告
+    else:
+        st.error("Excel 中缺少 'Main Part Num' 列，请检查文件格式")
+        return pd.DataFrame()
+    
+    # 3. 只保留有子零件号的行（即实际子零件记录）
+    if 'Subpart Part Num' not in df.columns:
+        st.error("Excel 中缺少 'Subpart Part Num' 列")
+        return pd.DataFrame()
     df_sub = df[df['Subpart Part Num'].notna()].copy()
-    # 提取工序步骤（列 Z ~ AS），命名为 Step_1 ~ Step_20
+    
+    if df_sub.empty:
+        st.warning("未找到任何子零件数据，请确认 Excel 格式")
+        return df_sub
+    
+    # 4. 提取工序步骤（列 Z ~ AS，即 Step 1 ~ Step 20）
     step_cols = [f'Step {i}' for i in range(1, 21)]
-    # 确保这些列存在
+    # 确保所有 Step 列都存在，缺失则补空列
     for col in step_cols:
         if col not in df_sub.columns:
             df_sub[col] = None
-    # 收集每个子零件的工序列表（忽略空值）
+    
+    # 5. 构建每个子零件的工序列表（过滤空值）
     def extract_steps(row):
         steps = []
         for col in step_cols:
             val = row[col]
+            # 判断非空：不为 NaN，且去除空格后非空字符串
             if pd.notna(val) and str(val).strip() != '':
                 steps.append(str(val).strip())
         return steps
+    
     df_sub['Process Steps'] = df_sub.apply(extract_steps, axis=1)
     df_sub['Step Count'] = df_sub['Process Steps'].apply(len)
-    # 首工序和末工序
     df_sub['First Step'] = df_sub['Process Steps'].apply(lambda x: x[0] if x else None)
     df_sub['Last Step'] = df_sub['Process Steps'].apply(lambda x: x[-1] if x else None)
+    
     return df_sub
 
 # ---------- 主界面 ----------
@@ -56,6 +75,10 @@ uploaded_file = st.file_uploader("上传 Excel 文件 (.xlsx)", type=['xlsx'])
 
 if uploaded_file is not None:
     df = load_data(uploaded_file)
+    
+    if df.empty:
+        st.stop()
+    
     st.success(f"✅ 数据加载成功，共 {len(df)} 个子零件行")
     
     # 侧边栏：Gemini API Key 输入
